@@ -2,13 +2,19 @@
 import snntorch as snn
 from snntorch import spikeplot as splt, surrogate
 from snntorch import spikegen
+from snntorch import surrogate
+from snntorch import functional as SF
+from snntorch import spikeplot as splt
+from snntorch import utils
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 from imblearn.over_sampling import SMOTE
+
 
 import matplotlib.pyplot as plt  # 可以尝试seaborn
 import numpy as np
@@ -66,50 +72,64 @@ beta = 0.5
 train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
 
+device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 # 步骤4: 定义神经网络模型
-class CustomModel(nn.Module):
+# Define Network
+class Net(nn.Module):
     def __init__(self):
-        super(CustomModel, self).__init__()
-        self.model = nn.Sequential(
-            # nn.Conv1d(1, 1),
-            # snn.Leaky(beta=beta, spike_grad=spike_grad),
-            # nn.Conv1d(1, 1),
-            # snn.Leaky(beta=beta, spike_grad=spike_grad),
+        super().__init__()
 
-            nn.Linear(3197, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 2),
-            nn.Sigmoid()
-            # nn.ReLU()
-            # nn.MaxPool1d(2)  # 添加最大池化层，每个样本维度减半
-        )
+        # Initialize layers
+        self.conv1 = nn.Linear(3197, 128)
+        self.lif1 = snn.Leaky(beta=beta, spike_grad=spike_grad)
+        self.conv2 = nn.Linear(64, 64)
+        self.lif2 = snn.Leaky(beta=beta, spike_grad=spike_grad)
+        self.fc1 = nn.Linear(32, 2)
+        self.lif3 = snn.Leaky(beta=beta, spike_grad=spike_grad)
+
+        self.softmax = nn.Softmax()
 
     def forward(self, x):
-        return self.model(x)
 
+        # Initialize hidden states and outputs at t=0
+        mem1 = self.lif1.init_leaky()
+        mem2 = self.lif2.init_leaky()
+        mem3 = self.lif3.init_leaky()
 
-model = CustomModel()
+        cur1 = F.max_pool1d(self.conv1(x), 2)
+        spk1, mem1 = self.lif1(cur1, mem1)
+
+        cur2 = F.max_pool1d(self.conv2(spk1), 2)
+        spk2, mem2 = self.lif2(cur2, mem2)
+
+        cur3 = self.fc1(spk2.view(batch_size, -1))
+        # spk3, mem3 = self.lif3(cur3, mem3)
+
+        # return spk3
+        return self.softmax(cur3)
+
+model = Net()
 
 # 步骤5: 定义损失函数和优化器
 criterion = nn.CrossEntropyLoss()  # 适用于分类问题 look up binarycross entropy
 optimizer = optim.SGD(model.parameters(), lr=0.001)
 
 # 步骤6: 训练模型
-num_epochs = 10
+num_epochs = 100
 for epoch in range(num_epochs):
     model.train()
     for data in train_dataloader:
         inputs, labels = data['feature'].float(), data['label']  # 数据类型转换为Float
         optimizer.zero_grad()
         outputs = model(inputs)
+        # print(torch.mean(outputs, 0))
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
 
-        print(f'Epoch [{epoch + 1}/{num_epochs}] Train Loss: {loss.item()}')
+    print(f'Epoch [{epoch + 1}/{num_epochs}] Train Loss: {loss.item()}')
 
     model.eval()
     with torch.no_grad():
